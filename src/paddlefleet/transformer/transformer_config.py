@@ -348,6 +348,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
