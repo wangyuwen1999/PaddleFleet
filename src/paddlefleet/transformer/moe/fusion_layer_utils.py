@@ -1990,6 +1990,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             scale = fp8_dispatched_handle["scale"]
             hidden_states = (hidden_states, scale)
 
+        # 进行expert的前向计算。
         out = ctx.node.forward(
             hidden_states, dispatched_indices, dispatched_probs
         )

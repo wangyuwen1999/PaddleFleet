@@ -727,6 +727,8 @@ class MoELayer(nn.Layer):
             hidden_states = self.fc1_latent_proj(hidden_states)
 
         should_log_balance = framework._dygraph_tracer()._has_grad
+        
+        # 按照gate计算得到的分布，进行分发
         with profile("dispatch"):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
                 hidden_states, probs, routing_map, topk_weights, topk_indices
@@ -743,6 +745,7 @@ class MoELayer(nn.Layer):
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
+        # 进行expert前向
         with profile("fusion_mlp"):
             if self._use_hybrid_ep_fusion():
                 hidden_states = self._run_hybrid_ep_fusion(
@@ -781,6 +784,7 @@ class MoELayer(nn.Layer):
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
 
+        # 进行expert前向后的结果汇总
         with profile("combine"):
             hidden_states = self.token_dispatcher._comm_manager.combine(
                 hidden_states,
@@ -788,6 +792,7 @@ class MoELayer(nn.Layer):
                 use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
 
+        # 进行expert前向后处理。
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
             hidden_states = self.fc2_latent_proj(hidden_states)
@@ -983,6 +988,8 @@ class MoELayer(nn.Layer):
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
+
+        # gate 计算token分布
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
         (
@@ -1020,6 +1027,8 @@ class MoELayer(nn.Layer):
             }
         else:
             combine_overlap_handle = None
+        
+        # 进行expert的前向
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
@@ -1068,6 +1077,7 @@ class MoELayer(nn.Layer):
         if self.training and z_loss is not None:
             output = AddAuxiliaryLoss.apply(output, z_loss)
 
+        # 进行expert前向后的后处理
         output = output.reshape(orig_shape)
         if self.shared_experts is not None:
             if combine_overlap_handle is not None:
@@ -1298,6 +1308,32 @@ class MoELayer(nn.Layer):
                         [expert.down_proj.weight],
                         quant_transpose=quant_transpose,
                     )
+
+    def clear_fp8_quant_weight(self):
+        """Clear cached FP8 quantized weights to release memory."""
+        if not (self.moe_use_fusion_node and self.fp8):
+            return
+
+        fp8_attrs = (
+            "fp8_weight_stacked",
+            "fp8_scale_stacked",
+            "fp8_weight_stacked_transpose",
+            "fp8_scale_stacked_transpose",
+        )
+
+        def _clear_attrs(weight_obj):
+            for attr in fp8_attrs:
+                if hasattr(weight_obj, attr):
+                    delattr(weight_obj, attr)
+
+        if hasattr(self, "grouped_gemm_experts"):
+            _clear_attrs(self.grouped_gemm_experts.weight1)
+            _clear_attrs(self.grouped_gemm_experts.weight2)
+        else:
+            for expert in self.experts:
+                if expert is not None:
+                    _clear_attrs(expert.up_gate_proj.weight)
+                    _clear_attrs(expert.down_proj.weight)
 
     def use_fp8(self):
         if self.moe_use_fusion_node and self.fp8:
